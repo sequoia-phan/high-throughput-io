@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -28,7 +29,11 @@ func NewUDSEngine(socketPath string, bufferSize int) *UDSEngine {
 	}
 
 	engine.wg.Add(1)
-	go engine.workerLoop()
+
+	//adding more CPU for parallel proccessing
+	for i := 0; i < runtime.NumCPU(); i++ {
+		go engine.workerLoop()
+	}
 
 	return engine
 }

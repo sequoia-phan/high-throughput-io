@@ -1,0 +1,21 @@
+# Rust build output
+rust_engine/target/
+
+# Runtime logs
+rust_engine/logs/
+
+# Go build binaries
+/cmd/*/orchestrator
+/cmd/*/worker
+/cmd/*/ioctl
+/cmd/*/benchmark
+*.exe
+
+# Env / local config
+.env
+.env.local
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
