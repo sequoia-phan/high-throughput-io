@@ -14,6 +14,9 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -21,6 +24,19 @@ func main() {
 	// debug mode
 	go func() {
 		http.ListenAndServe("192.168.1.27:6060", nil)
+	}()
+
+	// Metrics & Admin Server (Port 8082 - )
+	go func() {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{
+			EnableOpenMetrics: true,
+		}))
+
+		slog.Info("Prometheus metrics server is listening", "port", "8082")
+		if err := http.ListenAndServe(":8082", metricsMux); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Failed to start metrics server", "error", err)
+		}
 	}()
 
 	// Structured JSON Logger for K8s
@@ -34,7 +50,6 @@ func main() {
 
 	// Initial async UDS rust engine with in-mem ring buffer = 10,000 slots
 	rustEngine := storage.NewUDSEngine(socketPath, 10000)
-
 	defer rustEngine.Close()
 
 	router := api.NewRouter(cfg, rustEngine)

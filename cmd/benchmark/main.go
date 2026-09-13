@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,10 +14,16 @@ import (
 
 func main() {
 
-	targetURL := "http://192.168.1.27:8080/api/v1/logs"
+	targetURL := flag.String("url", "http://192.168.1.27:8080/api/v1/logs", "Target URL to benchmark")
 
-	totalRequests := 10000
-	concurrency := 10
+	totalRequests := flag.Int("n", 5000, "Total number of requests")
+	concurrency := flag.Int("c", 10, "Number of concurrent worker")
+	flag.Parse()
+
+	if *concurrency <= 0 || *totalRequests <= 0 {
+		fmt.Println("Error: -n và -c phải lớn hơn 0")
+		os.Exit(1)
+	}
 
 	payload := []byte(`[
 		{
@@ -32,25 +41,34 @@ func main() {
 
 	client := &http.Client{
 		Transport: &http.Transport{
-			MaxIdleConnsPerHost: 100,
+			MaxIdleConns:        1000,
+			MaxIdleConnsPerHost: *concurrency * 2,
+			IdleConnTimeout:     90 * time.Second,
+			DisableKeepAlives:   false,
 		},
 
 		Timeout: 5 * time.Second,
 	}
 
-	reqPerWorker := totalRequests / concurrency
+	reqPerWorker := *totalRequests / *concurrency
 
 	var wg sync.WaitGroup
 
-	fmt.Printf("=== START BENCHMARK: %d Requests | %d Workers ===\n", totalRequests, concurrency)
+	fmt.Printf("=== START BENCHMARK: %d Requests | %d Workers ===\n", *totalRequests, *concurrency)
 	startTime := time.Now()
 
-	for i := 0; i < concurrency; i++ {
+	for i := 0; i < *concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < reqPerWorker; j++ {
-				req, _ := http.NewRequest("POST", targetURL, bytes.NewBuffer(payload))
+
+				req, err := http.NewRequest("POST", *targetURL, bytes.NewReader(payload))
+				if err != nil {
+					atomic.AddUint64(&errorCount, 1)
+					continue
+				}
+
 				req.Header.Set("Content-Type", "application/json")
 
 				resp, err := client.Do(req)
@@ -59,12 +77,15 @@ func main() {
 					continue
 				}
 
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+
 				if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK {
 					atomic.AddUint64(&successCount, 1)
 				} else {
 					atomic.AddUint64(&errorCount, 1)
 				}
-				_ = resp.Body.Close()
+
 			}
 		}()
 	}

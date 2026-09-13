@@ -3,6 +3,7 @@ package api
 import (
 	"io/internal/config"
 	"io/internal/storage"
+	"io/pkg/telemetry"
 	"net/http"
 )
 
@@ -24,7 +25,7 @@ func NewRouter(cfg *config.Config, engine storage.EngineBridge) http.Handler {
 		w.Write([]byte(`{"status":"alive"}`))
 	})
 
-	return LoggerMiddleware(mux)
+	return LoggerMiddleware(telemetry.MetricsMiddleware(mux))
 }
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {

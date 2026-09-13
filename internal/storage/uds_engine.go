@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/pkg/telemetry"
 	"log/slog"
 	"net"
 	"runtime"
@@ -28,7 +29,8 @@ func NewUDSEngine(socketPath string, bufferSize int) *UDSEngine {
 		quit:       make(chan struct{}),
 	}
 
-	engine.wg.Add(1)
+	workerCount := runtime.NumCPU()
+	engine.wg.Add(workerCount)
 
 	//adding more CPU for parallel proccessing
 	for i := 0; i < runtime.NumCPU(); i++ {
@@ -41,10 +43,12 @@ func NewUDSEngine(socketPath string, bufferSize int) *UDSEngine {
 func (u *UDSEngine) connect() error {
 	conn, err := net.DialTimeout("unix", u.socketPath, 2*time.Second)
 	if err != nil {
+		telemetry.UDSConnectionAttemptsTotal.WithLabelValues("failure").Inc()
 		return err
 	}
 
 	u.conn = conn
+	telemetry.UDSConnectionAttemptsTotal.WithLabelValues("success").Inc()
 	slog.Info("Connected successfully to Rust UDS Engine", "path", u.socketPath)
 	return nil
 }
@@ -53,8 +57,10 @@ func (u *UDSEngine) WriteBatch(ctx context.Context, logs []LogEntry) error {
 	for _, entry := range logs {
 		select {
 		case u.logQueue <- entry:
+			telemetry.IPCQueueDepth.Set(float64(len(u.logQueue)))
 		default:
 			slog.Warn("Log buffer queue full! Dropping entry to protect HTTP thread", "client_id", entry.ClientID)
+			telemetry.DroppedLogsTotal.Inc()
 			return errors.New("buffer_full")
 		}
 	}
@@ -67,10 +73,12 @@ func (u *UDSEngine) workerLoop() {
 	for {
 		select {
 		case entry := <-u.logQueue:
+			telemetry.IPCQueueDepth.Set(float64(len(u.logQueue)))
 			u.writeToSocket(entry)
 		case <-u.quit:
 			for len(u.logQueue) > 0 {
 				entry := <-u.logQueue
+				telemetry.IPCQueueDepth.Set(float64(len(u.logQueue)))
 				u.writeToSocket(entry)
 			}
 			return
@@ -95,10 +103,15 @@ func (u *UDSEngine) writeToSocket(entry LogEntry) {
 		}
 
 		_ = u.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		writeStarted := time.Now()
 		_, err = u.conn.Write(data)
+		writeDuration := time.Since(writeStarted).Seconds()
+		telemetry.UDSWriteDuration.Observe(writeDuration)
+		telemetry.UDSWriteLatencySeconds.Set(writeDuration)
 
 		if err != nil {
 			slog.Error("Failed to write to UDS, socket resetting...", "error", err)
+			telemetry.UDSWriteFailuresTotal.Inc()
 			u.mu.Lock()
 			if u.conn != nil {
 				_ = u.conn.Close()
