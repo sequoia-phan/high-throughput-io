@@ -17,9 +17,13 @@ use tokio::{
     fs::OpenOptions,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::{TcpListener, UnixListener},
-    sync::mpsc,
-    time::{Duration, interval},
+    sync::{mpsc, oneshot},
 };
+
+struct PendingLog {
+    line: String,
+    ack: oneshot::Sender<Result<(), String>>,
+}
 
 #[derive(Debug, Deserialize)]
 struct LogEntry {
@@ -35,8 +39,8 @@ struct LogEntry {
 async fn main() -> Result<(), Box<dyn Error>> {
     let socket_path = "/tmp/io_rust_engine.sock";
     let log_dir = "./logs";
-    let metrics_addr = std::env::var("RUST_METRICS_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:9090".to_string());
+    let metrics_addr =
+        std::env::var("RUST_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9090".to_string());
 
     lazy_static::initialize(&metrics::RUST_WRITE_BYTES_TOTAL);
     lazy_static::initialize(&metrics::RUST_DISK_FLUSH_DURATION);
@@ -52,7 +56,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         fs::remove_file(socket_path)?;
     }
 
-    let (tx, mut rx) = mpsc::channel::<String>(50_000);
+    let (tx, mut rx) = mpsc::channel::<PendingLog>(50_000);
 
     // ==========================================
     // TASK 1: BACKGROUND BUFFERED DISK WRITER
@@ -69,32 +73,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .expect("Can't create or open file log");
 
         let mut writer = BufWriter::with_capacity(64 * 1024, file);
-        let mut flush_interval = interval(Duration::from_secs(1));
 
         println!("[Rust Disk Writer] Ready writing to {}", log_file_path);
 
-        loop {
-            tokio::select! {
-                Some(raw_log) = rx.recv() => {
-                    if let Err(e) = writer.write_all(raw_log.as_bytes()).await {
-                        eprintln!("[Disk Writer Error] Failed to write: {}", e);
-                        metrics::RUST_DISK_WRITE_FAILURES_TOTAL.inc();
-                    } else {
-                        metrics::RUST_WRITE_BYTES_TOTAL.inc_by(raw_log.len() as u64);
-                    }
+        while let Some(pending) = rx.recv().await {
+            let result = async {
+                writer.write_all(pending.line.as_bytes()).await?;
+                let flush_started = std::time::Instant::now();
+                writer.flush().await?;
+                metrics::RUST_DISK_FLUSH_DURATION.observe(flush_started.elapsed().as_secs_f64());
+                Ok::<(), std::io::Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    metrics::RUST_WRITE_BYTES_TOTAL.inc_by(pending.line.len() as u64);
+                    let _ = pending.ack.send(Ok(()));
                 }
-
-                // period
-                _ = flush_interval.tick() => {
-                    let flush_started = std::time::Instant::now();
-                    if let Err(e) = writer.flush().await {
-                        eprintln!("[Disk Writer Error] Failed to flush buffer: {}", e);
-                        metrics::RUST_DISK_FLUSH_FAILURES_TOTAL.inc();
-                    } else {
-                        metrics::RUST_DISK_FLUSH_DURATION.observe(flush_started.elapsed().as_secs_f64());
-                    }
+                Err(e) => {
+                    eprintln!("[Disk Writer Error] Failed to write and flush: {}", e);
+                    metrics::RUST_DISK_WRITE_FAILURES_TOTAL.inc();
+                    metrics::RUST_DISK_FLUSH_FAILURES_TOTAL.inc();
+                    let _ = pending.ack.send(Err(e.to_string()));
                 }
-                else => break,
             }
         }
     });
@@ -125,14 +126,56 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
 
                         // Validate JSON cơ bản trước khi đẩy qua Writer Channel
-                        if serde_json::from_str::<LogEntry>(&line).is_ok() {
-                            if let Err(e) = tx_clone.send(line.clone()).await {
+                        if let Ok(entry) = serde_json::from_str::<LogEntry>(&line) {
+                            // Read the fields so malformed required data is rejected at ingress.
+                            let _ = (
+                                &entry.client_id,
+                                entry.timestamp,
+                                &entry.level,
+                                &entry.message,
+                                &entry.payload,
+                            );
+                            let (ack_tx, ack_rx) = oneshot::channel();
+                            if let Err(e) = tx_clone
+                                .send(PendingLog {
+                                    line: line.clone(),
+                                    ack: ack_tx,
+                                })
+                                .await
+                            {
                                 eprintln!("[Rust Channel Error] Disk writer channel closed: {}", e);
                                 break;
                             }
+                            match ack_rx.await {
+                                Ok(Ok(())) => {
+                                    if reader.get_mut().write_all(b"OK\n").await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Ok(Err(message)) => {
+                                    let response = format!("ERR {}\n", message.replace('\n', " "));
+                                    if reader
+                                        .get_mut()
+                                        .write_all(response.as_bytes())
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
                         } else {
-                            eprintln!("[Rust Error] Invalid JSON payload dropped");
+                            eprintln!("[Rust Error] Invalid JSON payload rejected");
                             metrics::RUST_INVALID_LOGS_TOTAL.inc();
+                            if reader
+                                .get_mut()
+                                .write_all(b"ERR invalid log entry\n")
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
 
                         line.clear();

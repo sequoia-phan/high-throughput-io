@@ -1,67 +1,83 @@
 package storage
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/pkg/telemetry"
 	"log/slog"
 	"net"
-	"runtime"
 	"sync"
 	"time"
 )
 
+var ErrBufferFull = errors.New("storage queue is full")
+
+type remoteStorageError struct{ message string }
+
+func (e remoteStorageError) Error() string { return "Rust storage rejected log: " + e.message }
+
+type queuedLog struct {
+	entry LogEntry
+	done  chan error
+}
+
 type UDSEngine struct {
 	socketPath string
+	logQueue   chan queuedLog
+	connMu     sync.Mutex // Serialize each request/ack exchange on the stream socket.
 	conn       net.Conn
-	mu         sync.Mutex
-	logQueue   chan LogEntry
-	quit       chan struct{}
+	reader     *bufio.Reader
+	queueMu    sync.Mutex // Protect enqueue against queue close and make batches atomic.
+	closed     bool
 	wg         sync.WaitGroup
 }
 
-// NewUDSEngine, maximize logs in RAM
 func NewUDSEngine(socketPath string, bufferSize int) *UDSEngine {
-	engine := &UDSEngine{
-		socketPath: socketPath,
-		logQueue:   make(chan LogEntry, bufferSize),
-		quit:       make(chan struct{}),
+	if bufferSize < 1 {
+		bufferSize = 1
 	}
-
-	workerCount := runtime.NumCPU()
-	engine.wg.Add(workerCount)
-
-	//adding more CPU for parallel proccessing
-	for i := 0; i < runtime.NumCPU(); i++ {
-		go engine.workerLoop()
-	}
-
-	return engine
+	u := &UDSEngine{socketPath: socketPath, logQueue: make(chan queuedLog, bufferSize)}
+	u.wg.Add(1)
+	go u.workerLoop()
+	return u
 }
 
-func (u *UDSEngine) connect() error {
-	conn, err := net.DialTimeout("unix", u.socketPath, 2*time.Second)
-	if err != nil {
-		telemetry.UDSConnectionAttemptsTotal.WithLabelValues("failure").Inc()
-		return err
-	}
-
-	u.conn = conn
-	telemetry.UDSConnectionAttemptsTotal.WithLabelValues("success").Inc()
-	slog.Info("Connected successfully to Rust UDS Engine", "path", u.socketPath)
-	return nil
-}
-
+// WriteBatch enqueues the entire batch or none of it, then waits for the Rust
+// writer to acknowledge every entry after writing and flushing it.
 func (u *UDSEngine) WriteBatch(ctx context.Context, logs []LogEntry) error {
-	for _, entry := range logs {
+	if len(logs) == 0 {
+		return nil
+	}
+	items := make([]queuedLog, len(logs))
+	u.queueMu.Lock()
+	if u.closed {
+		u.queueMu.Unlock()
+		return errors.New("storage engine is closed")
+	}
+	if len(logs) > cap(u.logQueue)-len(u.logQueue) {
+		u.queueMu.Unlock()
+		telemetry.DroppedLogsTotal.Add(float64(len(logs)))
+		return ErrBufferFull
+	}
+	for i, entry := range logs {
+		items[i] = queuedLog{entry: entry, done: make(chan error, 1)}
+		u.logQueue <- items[i]
+	}
+	u.queueMu.Unlock()
+	telemetry.IPCQueueDepth.Set(float64(len(u.logQueue)))
+
+	for _, item := range items {
 		select {
-		case u.logQueue <- entry:
-			telemetry.IPCQueueDepth.Set(float64(len(u.logQueue)))
-		default:
-			slog.Warn("Log buffer queue full! Dropping entry to protect HTTP thread", "client_id", entry.ClientID)
-			telemetry.DroppedLogsTotal.Inc()
-			return errors.New("buffer_full")
+		case err := <-item.done:
+			if err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 	return nil
@@ -69,67 +85,110 @@ func (u *UDSEngine) WriteBatch(ctx context.Context, logs []LogEntry) error {
 
 func (u *UDSEngine) workerLoop() {
 	defer u.wg.Done()
-
-	for {
-		select {
-		case entry := <-u.logQueue:
-			telemetry.IPCQueueDepth.Set(float64(len(u.logQueue)))
-			u.writeToSocket(entry)
-		case <-u.quit:
-			for len(u.logQueue) > 0 {
-				entry := <-u.logQueue
-				telemetry.IPCQueueDepth.Set(float64(len(u.logQueue)))
-				u.writeToSocket(entry)
-			}
-			return
-		}
+	for item := range u.logQueue {
+		telemetry.IPCQueueDepth.Set(float64(len(u.logQueue)))
+		item.done <- u.writeToSocket(item.entry)
 	}
 }
 
-func (u *UDSEngine) writeToSocket(entry LogEntry) {
+func (u *UDSEngine) connectLocked() error {
+	conn, err := net.DialTimeout("unix", u.socketPath, 2*time.Second)
+	if err != nil {
+		telemetry.UDSConnectionAttemptsTotal.WithLabelValues("failure").Inc()
+		return err
+	}
+	u.conn = conn
+	u.reader = bufio.NewReader(conn)
+	telemetry.UDSConnectionAttemptsTotal.WithLabelValues("success").Inc()
+	slog.Info("Connected to Rust UDS engine", "path", u.socketPath)
+	return nil
+}
+
+func (u *UDSEngine) writeToSocket(entry LogEntry) error {
 	data, err := json.Marshal(entry)
 	if err != nil {
-		return
+		return fmt.Errorf("encode log entry: %w", err)
 	}
-
 	data = append(data, '\n')
 
 	for {
+		err = nil
+		rejected := false
+		u.connMu.Lock()
 		if u.conn == nil {
-			if err := u.connect(); err != nil {
-				time.Sleep(500 * time.Millisecond)
-				continue
-			}
+			err = u.connectLocked()
 		}
-
-		_ = u.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		writeStarted := time.Now()
-		_, err = u.conn.Write(data)
-		writeDuration := time.Since(writeStarted).Seconds()
-		telemetry.UDSWriteDuration.Observe(writeDuration)
-		telemetry.UDSWriteLatencySeconds.Set(writeDuration)
-
-		if err != nil {
-			slog.Error("Failed to write to UDS, socket resetting...", "error", err)
-			telemetry.UDSWriteFailuresTotal.Inc()
-			u.mu.Lock()
-			if u.conn != nil {
-				_ = u.conn.Close()
-				u.conn = nil
+		if err == nil {
+			_ = u.conn.SetDeadline(time.Now().Add(5 * time.Second))
+			started := time.Now()
+			for written := 0; written < len(data) && err == nil; {
+				var n int
+				n, err = u.conn.Write(data[written:])
+				written += n
+				if n == 0 && err == nil {
+					err = io.ErrShortWrite
+				}
 			}
-			u.mu.Unlock()
-			continue
+			if err == nil {
+				var ack string
+				ack, err = u.reader.ReadString('\n')
+				if err == nil && ack != "OK\n" {
+					rejected = true
+					err = remoteStorageError{message: ack}
+				}
+			}
+			duration := time.Since(started).Seconds()
+			telemetry.UDSWriteDuration.Observe(duration)
+			telemetry.UDSWriteLatencySeconds.Set(duration)
 		}
-		break
+		if err == nil {
+			_ = u.conn.SetDeadline(time.Time{})
+			u.connMu.Unlock()
+			return nil
+		}
+		if rejected {
+			// The Rust peer consumed this request and returned a definitive error.
+			// Keep the stream aligned and report it instead of retrying the same log.
+			u.connMu.Unlock()
+			return err
+		}
+		telemetry.UDSWriteFailuresTotal.Inc()
+		if u.conn != nil {
+			_ = u.conn.Close()
+			u.conn = nil
+			u.reader = nil
+		}
+		u.connMu.Unlock()
+		u.queueMu.Lock()
+		closing := u.closed
+		u.queueMu.Unlock()
+		if closing {
+			return fmt.Errorf("storage engine closed before acknowledgment: %w", err)
+		}
+		if errors.Is(err, io.EOF) {
+			err = errors.New("Rust engine closed the connection before acknowledging the log")
+		}
+		slog.Warn("UDS write or acknowledgment failed; retrying", "error", err)
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
+// Close rejects new batches, drains queued entries, and waits for workers.
 func (u *UDSEngine) Close() error {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-
+	u.queueMu.Lock()
+	if !u.closed {
+		u.closed = true
+		close(u.logQueue)
+	}
+	u.queueMu.Unlock()
+	u.wg.Wait()
+	u.connMu.Lock()
+	defer u.connMu.Unlock()
 	if u.conn != nil {
-		return u.conn.Close()
+		err := u.conn.Close()
+		u.conn = nil
+		u.reader = nil
+		return err
 	}
 	return nil
 }

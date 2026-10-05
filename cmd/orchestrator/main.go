@@ -48,9 +48,8 @@ func main() {
 
 	socketPath := "/tmp/io_rust_engine.sock"
 
-	// Initial async UDS rust engine with in-mem ring buffer = 10,000 slots
+	// UDS bridge with a bounded in-memory queue for pending log entries.
 	rustEngine := storage.NewUDSEngine(socketPath, 10000)
-	defer rustEngine.Close()
 
 	router := api.NewRouter(cfg, rustEngine)
 
@@ -76,5 +75,10 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = server.Shutdown(ctx)
+	if err := server.Shutdown(ctx); err != nil {
+		slog.Error("HTTP server shutdown did not complete cleanly", "error", err)
+	}
+	if err := rustEngine.Close(); err != nil {
+		slog.Error("Storage engine shutdown did not complete cleanly", "error", err)
+	}
 }

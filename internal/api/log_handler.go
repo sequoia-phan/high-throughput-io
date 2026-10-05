@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io/internal/storage"
 	"net/http"
 )
@@ -28,7 +29,15 @@ func (h *LogHandler) IngestLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.rustEngine.WriteBatch(r.Context(), entries); err != nil {
-		http.Error(w, `{"error":"storage_engine_failed"}`, http.StatusInternalServerError)
+		if errors.Is(err, storage.ErrBufferFull) {
+			http.Error(w, `{"error":"storage_queue_full"}`, http.StatusServiceUnavailable)
+			return
+		}
+		if r.Context().Err() != nil {
+			http.Error(w, `{"error":"request_cancelled"}`, http.StatusRequestTimeout)
+			return
+		}
+		http.Error(w, `{"error":"storage_engine_failed"}`, http.StatusBadGateway)
 		return
 	}
 
