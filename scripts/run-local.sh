@@ -1,61 +1,61 @@
 #!/usr/bin/env bash
-# Start the Rust disk engine and the Go HTTP gateway for local development.
+# Start the Rust disk engine and the Go gRPC Orchestrator for local development.
 set -euo pipefail
 
-project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-rust_dir="$project_dir/rust_engine"
-socket_path="/tmp/io_rust_engine.sock"
-rust_pid=""
-go_pid=""
+# Get the absolute path of the project root
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUST_DIR="$PROJECT_DIR/rust_engine"
+SOCKET_PATH="/tmp/io_rust_engine.sock"
+RUST_PID=""
+GO_PID=""
 
-cd "$project_dir"
+cd "$PROJECT_DIR"
 
-# Local configuration is optional. Values already exported in the shell win.
-if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
-
+# Dependency check
 for command in cargo go; do
   if ! command -v "$command" >/dev/null 2>&1; then
-    echo "Error: '$command' is required but was not found in PATH." >&2
+    echo "Error:  is required but was not found in PATH." >&2
     exit 1
   fi
 done
 
 cleanup() {
   trap - EXIT INT TERM
-  [[ -n "$go_pid" ]] && kill "$go_pid" 2>/dev/null || true
-  [[ -n "$rust_pid" ]] && kill "$rust_pid" 2>/dev/null || true
-  [[ -n "$go_pid" ]] && wait "$go_pid" 2>/dev/null || true
-  [[ -n "$rust_pid" ]] && wait "$rust_pid" 2>/dev/null || true
+  [[ -n "$GO_PID" ]] && kill "$GO_PID" 2>/dev/null || true
+  [[ -n "$RUST_PID" ]] && kill "$RUST_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting Rust engine (metrics: http://localhost:9090/metrics)..."
-(cd "$rust_dir" && cargo run) &
-rust_pid=$!
+echo "--- [1/2] Starting Rust Engine ---"
+echo "Expect socket at: $SOCKET_PATH"
 
-for _ in {1..100}; do
-  if [[ -S "$socket_path" ]]; then
+# Start Rust engine in background
+(cd "$RUST_DIR" && cargo run) &
+RUST_PID=$!
+
+# Wait for Rust socket to be created before starting Go
+echo "Waiting for Rust socket..."
+for i in {1..50}; do
+  if [[ -S "$SOCKET_PATH" ]]; then
+    echo "✅ Rust engine socket created."
     break
   fi
-  if ! kill -0 "$rust_pid" 2>/dev/null; then
-    echo "Error: Rust engine exited before creating $socket_path." >&2
+  if ! kill -0 "$RUST_PID" 2>/dev/null; then
+    echo "Error: Rust engine exited prematurely." >&2
     exit 1
   fi
-  sleep 0.1
+  sleep 0.2
 done
 
-if [[ ! -S "$socket_path" ]]; then
-  echo "Error: timed out waiting for Rust engine socket: $socket_path" >&2
+if [[ ! -S "$SOCKET_PATH" ]]; then
+  echo "Error: Timed out waiting for Rust engine socket at $SOCKET_PATH." >&2
   exit 1
 fi
 
-echo "Starting Go orchestrator (API: http://localhost:${APP_PORT:-8080})..."
-go run ./cmd/orchestrator &
-go_pid=$!
+echo "--- [2/2] Starting Go Orchestrator ---"
+echo "gRPC Server: localhost:50051"
+go run ./cmd/orchestrator/main.go &
+GO_PID=$!
 
-wait "$go_pid"
+# Keep script alive until Go process exits
+wait "$GO_PID"

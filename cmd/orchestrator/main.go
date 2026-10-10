@@ -2,83 +2,46 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io/internal/api"
-	"io/internal/config"
+	"io/internal/service"
 	"io/internal/storage"
-	"log/slog"
-	"net/http"
-	_ "net/http/pprof"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
+	log.Println("🚀 Starting Production High-Throughput Push-Based Orchestrator...")
 
-	// debug mode
-	go func() {
-		http.ListenAndServe("192.168.1.27:6060", nil)
-	}()
+	// 1. Initialize Storage Engine - Using the socket path used by the Rust binary
+	engine := storage.NewUDSEngine("/tmp/io_rust_engine.sock")
 
-	// Metrics & Admin Server (Port 8082 - )
-	go func() {
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle("/metrics", promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{
-			EnableOpenMetrics: true,
-		}))
+	// 2. Initialize Production Pipeline (The Shock Absorber)
+	pipeline := service.NewBatchProcessor(engine, 100, 1*time.Second)
+	pipeline.Start()
 
-		slog.Info("Prometheus metrics server is listening", "port", "8082")
-		if err := http.ListenAndServe(":8082", metricsMux); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("Failed to start metrics server", "error", err)
-		}
-	}()
-
-	// Structured JSON Logger for K8s
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
-
-	// loading config
-	cfg := config.Load()
-
-	socketPath := "/tmp/io_rust_engine.sock"
-
-	// UDS bridge with a bounded in-memory queue for pending log entries.
-	rustEngine := storage.NewUDSEngine(socketPath, 10000)
-
-	router := api.NewRouter(cfg, rustEngine)
-
-	server := &http.Server{
-		Addr:         fmt.Sprintf(":%s", cfg.Port),
-		Handler:      router,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
-
-	// run Server in background with goroutine
-	go func() {
-		slog.Info("Server is listening", "port", cfg.Port)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("Failed to start server", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 3. Initialize Health Tracker (Tracks VM heartbeats)
+	health := service.NewHealthTracker(15 * time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
-		slog.Error("HTTP server shutdown did not complete cleanly", "error", err)
-	}
-	if err := rustEngine.Close(); err != nil {
-		slog.Error("Storage engine shutdown did not complete cleanly", "error", err)
-	}
+	health.Start(ctx)
+
+	// 4. Initialize gRPC Server (The Sink)
+	grpcServer := api.NewMetricsServer(pipeline, health)
+	
+	go grpcServer.Start("50099")
+
+	log.Println("✅ System is live. Listening for gRPC pushes on port 50099.")
+	log.Println("Connected to Rust Storage Engine via /tmp/io_rust_engine.sock")
+	log.Println("Waiting for VM Agents to push metrics... Press Ctrl+C to stop.")
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+
+	log.Println("Stopping services...")
+	pipeline.Stop()
+	log.Println("Shutdown complete.")
 }

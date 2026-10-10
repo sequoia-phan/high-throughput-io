@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package metrics;
+
+option go_package = "io/internal/api";
+
+// The request sent by the VM Agent
+message MetricRequest {
+    string client_id = 1;
+    int64 timestamp = 2;
+    string level = 3;
+    string message = 4;
+    map<string, string> payload = 5;
+}
+
+// The response sent back by the Go Orchestrator
+message MetricResponse {
+    bool success = 1;
+    string error_message = 2;
+}
+
+// The Service definition
+service MetricsService {
+    // Stream metrics from the VM to the server for high throughput
+    rpc StreamMetrics(stream MetricRequest) returns (MetricResponse);
+    
+    // Single metric upload for simple heartbeats
+    rpc UploadMetric(MetricRequest) returns (MetricResponse);
+}

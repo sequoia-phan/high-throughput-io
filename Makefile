@@ -1,24 +1,14 @@
-.PHONY: run run-rust run-go benchmark test test-go test-rust
+.PHONY: build-agent clean
 
-# Run both components locally. Ctrl-C stops the Go and Rust processes.
-run:
-	./scripts/run-local.sh
+# Configuration
+BINARY_AGENT=vm-agent
+AGENT_PATH=cmd/agent/main.go
 
-# These targets are useful when inspecting either component independently.
-run-rust:
-	cd "$(CURDIR)/rust_engine" && cargo run
+build-agent:
+	@echo "🔨 Building VM Agent (Static Linux Binary)..."
+	CGO_ENABLED=0 GOOS=linux go build -o $(BINARY_AGENT) $(AGENT_PATH)
+	@echo "✅ Agent built successfully: $(BINARY_AGENT)"
 
-run-go:
-	go run ./cmd/orchestrator
-
-# Example: make benchmark BENCHMARK_ARGS='-url http://localhost:8080/api/v1/logs -n 5000 -c 10'
-benchmark:
-	go run ./cmd/benchmark $(BENCHMARK_ARGS)
-
-test: test-go test-rust
-
-test-go:
-	go test ./...
-
-test-rust:
-	cargo test --manifest-path rust_engine/Cargo.toml
+clean:
+	@echo "🧹 Cleaning agent binary..."
+	rm -f $(BINARY_AGENT)
