@@ -48,23 +48,26 @@ func (u *UDSEngine) WriteBatch(ctx context.Context, logs []LogEntry) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	data, err := json.Marshal(logs)
-	if err != nil {
-		return fmt.Errorf("failed to marshal batch: %w", err)
+	for _, logEntry := range logs {
+		data, err := json.Marshal(logEntry)
+		if err != nil {
+			return fmt.Errorf("failed to marshal log entry: %w", err)
+		}
+		data = append(data, '\n')
+
+		u.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+
+		n, err := u.conn.Write(data)
+		if err != nil {
+			log.Printf("[UDS] ❌ Write error: %v", err)
+			u.conn.Close()
+			u.conn = nil
+			return fmt.Errorf("socket write error: %w", err)
+		}
+
+		log.Printf("[UDS] 📤 Successfully wrote %d bytes to Rust Engine", n)
 	}
-	data = append(data, '\n')
 
-	u.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-
-	n, err := u.conn.Write(data)
-	if err != nil {
-		log.Printf("[UDS] ❌ Write error: %v", err)
-		u.conn.Close()
-		u.conn = nil
-		return fmt.Errorf("socket write error: %w", err)
-	}
-
-	log.Printf("[UDS] 📤 Successfully wrote %d bytes to Rust Engine", n)
 	return nil
 }
 

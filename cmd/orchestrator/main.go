@@ -19,7 +19,7 @@ func main() {
 	engine := storage.NewUDSEngine("/tmp/io_rust_engine.sock")
 
 	// 2. Initialize Production Pipeline (The Shock Absorber)
-	pipeline := service.NewBatchProcessor(engine, 100, 1*time.Second)
+	pipeline := service.NewBatchProcessor(engine, 5000, 200*time.Millisecond)
 	pipeline.Start()
 
 	// 3. Initialize Health Tracker (Tracks VM heartbeats)
@@ -30,7 +30,7 @@ func main() {
 
 	// 4. Initialize gRPC Server (The Sink)
 	grpcServer := api.NewMetricsServer(pipeline, health)
-	
+
 	go grpcServer.Start("50099")
 
 	log.Println("✅ System is live. Listening for gRPC pushes on port 50099.")

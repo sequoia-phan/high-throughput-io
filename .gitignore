@@ -19,3 +19,5 @@ rust_engine/logs/
 .vscode/
 .idea/
 .DS_Store
+
+/bin/*

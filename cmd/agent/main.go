@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	metricspb "io/internal/api"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -42,42 +44,58 @@ func (a *Agent) CollectMetrics() storage.LogEntry {
 
 func (a *Agent) readCPU() float64 {
 	data, err := os.ReadFile("/proc/stat")
-	if err != nil { return 0.0 }
+	if err != nil {
+		return 0.0
+	}
 	lines := strings.Split(string(data), "\n")
-	if len(lines) < 1 { return 0.0 }
+	if len(lines) < 1 {
+		return 0.0
+	}
 	fields := strings.Fields(lines[0])
-	if len(fields) < 5 { return 0.0 }
+	if len(fields) < 5 {
+		return 0.0
+	}
 	user, _ := strconv.ParseFloat(fields[1], 64)
 	nice, _ := strconv.ParseFloat(fields[2], 64)
 	system, _ := strconv.ParseFloat(fields[3], 64)
 	idle, _ := strconv.ParseFloat(fields[4], 64)
 	total := user + nice + system + idle
-	if total == 0 { return 0.0 }
+	if total == 0 {
+		return 0.0
+	}
 	return ((total - idle) / total) * 100
 }
 
 func (a *Agent) readMem() float64 {
 	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil { return 0.0 }
+	if err != nil {
+		return 0.0
+	}
 	var total, free float64
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "MemTotal:") {
 			fields := strings.Fields(line)
-			if len(fields) >= 2 { total, _ = strconv.ParseFloat(fields[1], 64) }
+			if len(fields) >= 2 {
+				total, _ = strconv.ParseFloat(fields[1], 64)
+			}
 		} else if strings.HasPrefix(line, "MemAvailable:") {
 			fields := strings.Fields(line)
-			if len(fields) >= 2 { free, _ = strconv.ParseFloat(fields[1], 64) }
+			if len(fields) >= 2 {
+				free, _ = strconv.ParseFloat(fields[1], 64)
+			}
 		}
 	}
-	if total == 0 { return 0.0 }
+	if total == 0 {
+		return 0.0
+	}
 	return ((total - free) / total) * 100
 }
 
 func (a *Agent) Run() {
 	for {
 		log.Printf("--- Starting Connection Probe to %s ---", a.serverAddr)
-		
+
 		if err := a.testRawTCP(); err != nil {
 			log.Printf("❌ RAW TCP FAILURE: %v", err)
 			log.Println("The server is not accepting TCP connections. Check Firewall/Listening IP.")
@@ -86,15 +104,20 @@ func (a *Agent) Run() {
 		}
 		log.Println("✅ RAW TCP SUCCESS: The port is open and accepting data.")
 
-		conn, err := grpc.NewClient(a.serverAddr, 
+		conn, err := grpc.NewClient(
+			a.serverAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		)
+
 		if err != nil {
 			log.Printf("❌ gRPC Client Error: %v", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		a.conn = conn
+
+		//Explicitly initiate the connection
+		a.conn.Connect()
 
 		if err := a.waitForReady(5 * time.Second); err != nil {
 			log.Printf("❌ gRPC PROTOCOL FAILURE: %v", err)
@@ -105,15 +128,15 @@ func (a *Agent) Run() {
 		}
 
 		log.Println("✅ gRPC CONNECTION ESTABLISHED.")
-		
+
 		for {
 			metric := a.CollectMetrics()
 			if err := a.realGrpcInvoke(metric); err != nil {
 				log.Printf("❌ Push Error: %v", err)
-				break 
+				break
 			}
 			log.Printf("[Push] ✅ %s", metric.Message)
-			time.Sleep(2 * time.Second)
+			time.Sleep(1 * time.Millisecond)
 		}
 		a.conn.Close()
 	}
@@ -125,6 +148,7 @@ func (a *Agent) testRawTCP() error {
 		return err
 	}
 	defer conn.Close()
+
 	_, err = conn.Write([]byte("PING"))
 	return err
 }
@@ -148,19 +172,42 @@ func (a *Agent) waitForReady(timeout time.Duration) error {
 }
 
 func (a *Agent) realGrpcInvoke(entry storage.LogEntry) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
 	defer cancel()
-	var reply interface{}
-	err := a.conn.Invoke(ctx, "/metrics.MetricsService/UploadMetric", &entry, &reply)
-	if err != nil && !strings.Contains(err.Error(), "Unimplemented") {
-		return err
+
+	// Convert the internal storage model into the Protobuf request.
+	req := &metricspb.MetricRequest{
+		ClientId:  entry.ClientID,
+		Timestamp: time.Now().Unix(),
+		Level:     entry.Level,
+		Message:   entry.Message,
+		Payload:   map[string]string{},
 	}
+
+	client := metricspb.NewMetricsServiceClient(a.conn)
+
+	reply, err := client.UploadMetric(ctx, req)
+	if err != nil {
+		return fmt.Errorf("UploadMetric RPC failed: %w", err)
+	}
+
+	// Do not treat a negative application response as success.
+	if !reply.GetSuccess() {
+		return fmt.Errorf(
+			"server rejected metric: %s",
+			reply.GetErrorMessage(),
+		)
+	}
+
 	return nil
 }
 
 func main() {
-	clientID := "vm-pve-host" 
-	serverAddr := "192.168.1.27:50099" 
+	clientID := "vm-pve-host"
+	serverAddr := "192.168.1.53:50099"
 
 	agent := NewAgent(clientID, serverAddr)
 	agent.Run()
