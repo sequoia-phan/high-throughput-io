@@ -37,10 +37,15 @@ struct LogEntry {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let socket_path = "/tmp/io_rust_engine.sock";
+    let socket_path = std::env::var("RUST_SOCKET_PATH")
+        .unwrap_or_else(|_| "/tmp/io_rust_engine.sock".to_string());
     let log_dir = "./logs";
     let metrics_addr =
         std::env::var("RUST_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9090".to_string());
+
+    println!("[Rust Engine] Socket path: {}", socket_path);
+    println!("[Rust Engine] Log dir: {}", log_dir);
+    println!("[Rust Engine] Metrics addr: {}", metrics_addr);
 
     lazy_static::initialize(&metrics::RUST_WRITE_BYTES_TOTAL);
     lazy_static::initialize(&metrics::RUST_DISK_FLUSH_DURATION);
@@ -52,8 +57,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(log_dir)?;
     }
 
-    if Path::new(socket_path).exists() {
-        fs::remove_file(socket_path)?;
+    if Path::new(&socket_path).exists() {
+        println!("[Rust Engine] Removing existing socket file");
+        fs::remove_file(&socket_path)?;
     }
 
     let (tx, mut rx) = mpsc::channel::<PendingLog>(50_000);
@@ -109,7 +115,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // ==========================================
     // TASK 2: UDS SOCKET LISTENER
     // ==========================================
-    let listener = UnixListener::bind(socket_path)?;
+    println!("[Rust Engine] Binding to UDS: {}", socket_path);
+    let listener = UnixListener::bind(&socket_path)?;
     println!("[Rust Engine] Listening on UDS: {}", socket_path);
 
     loop {
@@ -125,7 +132,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             break;
                         }
 
-                        // Validate JSON cơ bản trước khi đẩy qua Writer Channel
+                        // Validate JSON Writer Channel
                         if let Ok(entry) = serde_json::from_str::<LogEntry>(&line) {
                             // Read the fields so malformed required data is rejected at ingress.
                             let _ = (

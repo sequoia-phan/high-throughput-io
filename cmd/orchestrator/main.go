@@ -2,15 +2,42 @@ package main
 
 import (
 	"context"
+	"flag"
 	"io/internal/api"
 	"io/internal/service"
 	"io/internal/storage"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
+
+// ----- flags ---------------------------------------------------------
+var (
+	batchSizeFlag = flag.Int("batch-size", 20_000, "number of entries that trigger a flush")
+	flushDurFlag  = flag.Duration("flush-interval", 500*time.Millisecond, "max time to wait before flushing a partial batch")
+
+	batchSizeEnv = func() int {
+		if v := os.Getenv("BATCH_SIZE"); v != "" {
+			if i, err := strconv.Atoi(v); err == nil && i > 0 {
+				return i
+			}
+		}
+		return *batchSizeFlag
+	}()
+	flushDurEnv = func() time.Duration {
+		if v := os.Getenv("FLUSH_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				return d
+			}
+		}
+		return *flushDurFlag
+	}()
+)
+
+// ---------------------------------------------------------------------
 
 func main() {
 	log.Println("🚀 Starting Production High-Throughput Push-Based Orchestrator...")
@@ -19,7 +46,7 @@ func main() {
 	engine := storage.NewUDSEngine("/tmp/io_rust_engine.sock")
 
 	// 2. Initialize Production Pipeline (The Shock Absorber)
-	pipeline := service.NewBatchProcessor(engine, 5000, 200*time.Millisecond)
+	pipeline := service.NewBatchProcessor(engine, 20000, 50*time.Millisecond)
 	pipeline.Start()
 
 	// 3. Initialize Health Tracker (Tracks VM heartbeats)

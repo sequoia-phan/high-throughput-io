@@ -21,3 +21,5 @@ rust_engine/logs/
 .DS_Store
 
 /bin/*
+
+Important.md

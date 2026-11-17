@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"flag"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,21 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// ----- flags ---------------------------------------------------------
+var (
+	agentSleep    = flag.Duration("sleep", 1*time.Millisecond, "time to sleep between metric pushes (e.g. 200ms, 500us)")
+	agentEnvSleep = func() time.Duration {
+		if v := os.Getenv("AGENT_SLEEP"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				return d
+			}
+		}
+		return *agentSleep
+	}()
+)
+
+// ---------------------------------------------------------------------
 
 type Agent struct {
 	clientID   string
@@ -136,7 +152,7 @@ func (a *Agent) Run() {
 				break
 			}
 			log.Printf("[Push] ✅ %s", metric.Message)
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(200 * time.Microsecond)
 		}
 		a.conn.Close()
 	}

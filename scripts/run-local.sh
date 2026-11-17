@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Start the Rust disk engine and the Go gRPC Orchestrator for local development.
+# Improved to use built binaries if available, otherwise fall back to `go run` and `cargo run`.
 set -euo pipefail
 
 # Get the absolute path of the project root
@@ -14,7 +15,7 @@ cd "$PROJECT_DIR"
 # Dependency check
 for command in cargo go; do
   if ! command -v "$command" >/dev/null 2>&1; then
-    echo "Error:  is required but was not found in PATH." >&2
+    echo "Error: $command is required but was not found in PATH." >&2
     exit 1
   fi
 done
@@ -29,8 +30,14 @@ trap cleanup EXIT INT TERM
 echo "--- [1/2] Starting Rust Engine ---"
 echo "Expect socket at: $SOCKET_PATH"
 
-# Start Rust engine in background
-(cd "$RUST_DIR" && cargo run) &
+# Check if we have a pre-built Rust binary (release build)
+if [[ -f "$RUST_DIR/target/release/rust_engine" ]]; then
+  echo "Using pre-built Rust binary: $RUST_DIR/target/release/rust_engine"
+  (cd "$RUST_DIR" && ./target/release/rust_engine) &
+else
+  echo "Building and running Rust engine with cargo run (dev mode)..."
+  (cd "$RUST_DIR" && cargo run) &
+fi
 RUST_PID=$!
 
 # Wait for Rust socket to be created before starting Go
@@ -53,8 +60,14 @@ if [[ ! -S "$SOCKET_PATH" ]]; then
 fi
 
 echo "--- [2/2] Starting Go Orchestrator ---"
-echo "gRPC Server: localhost:50051"
-go run ./cmd/orchestrator/main.go &
+# Check if we have a pre-built Go server binary
+if [[ -f "$PROJECT_DIR/bin/release/grpc-server" ]]; then
+  echo "Using pre-built Go server binary: $PROJECT_DIR/bin/release/grpc-server"
+  "$PROJECT_DIR/bin/release/grpc-server" &
+else
+  echo "Building and running Go orchestrator with go run (dev mode)..."
+  go run ./cmd/orchestrator/main.go &
+fi
 GO_PID=$!
 
 # Keep script alive until Go process exits
