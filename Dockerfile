@@ -20,6 +20,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/grpc-server ./cmd/orchestrator/mai
 # ========== RUST BUILD STAGE ==========
 FROM rust:1-slim AS rust-builder
 
+# Musl tool
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends musl-tools && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy Rust source

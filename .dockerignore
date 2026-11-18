@@ -1,0 +1,26 @@
+# Version control
+.git
+.github
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Compiled artifacts
+bin/
+**/target/
+
+# Runtime data
+**/logs/
+*.log
+
+# Local development
+.vscode/
+.idea/
+.DS_Store
+
+# Documentation and temporary files
+docs/
+*.tmp
+*.swp

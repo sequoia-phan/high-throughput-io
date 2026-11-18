@@ -16,17 +16,20 @@ RUST_PID=$!
 
 # Wait for the Unix domain socket to be created
 echo "Waiting for Rust socket at $SOCKET_PATH..."
-for i in {1..50}; do
-  if [ -S "$SOCKET_PATH" ]; then
-    echo "Rust socket created."
-    break
-  fi
-  # Check if Rust process is still alive
-  if ! kill -0 $RUST_PID 2>/dev/null; then
-    echo "Rust engine exited unexpectedly!" >&2
-    exit 1
-  fi
-  sleep 0.2
+i=1
+while [ "$i" -le 50 ]; do
+    if [ -S "$SOCKET_PATH" ]; then
+        echo "Rust socket created."
+        break
+    fi
+
+    if ! kill -0 "$RUST_PID" 2>/dev/null; then
+        echo "Rust engine exited unexpectedly!" >&2
+        exit 1
+    fi
+
+    sleep 0.2
+    i=$((i + 1))
 done
 
 if [ ! -S "$SOCKET_PATH" ]; then
