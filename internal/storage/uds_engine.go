@@ -1,18 +1,22 @@
 package storage
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
-	"log"
 )
 
 type UDSEngine struct {
 	socketPath string
 	conn       net.Conn
+	reader     *bufio.Reader
 	mu         sync.Mutex
 }
 
@@ -37,10 +41,16 @@ func (u *UDSEngine) connect() error {
 	}
 	log.Println("[UDS] ✅ Successfully connected to Rust Engine socket")
 	u.conn = conn
+	u.reader = bufio.NewReader(conn)
+
 	return nil
 }
 
 func (u *UDSEngine) WriteBatch(ctx context.Context, logs []LogEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if err := u.connect(); err != nil {
 		return err
 	}
@@ -48,25 +58,97 @@ func (u *UDSEngine) WriteBatch(ctx context.Context, logs []LogEntry) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	for _, logEntry := range logs {
-		data, err := json.Marshal(logEntry)
-		if err != nil {
-			return fmt.Errorf("failed to marshal log entry: %w", err)
+	// Close the connection on an I/O or protocol error.
+	// Never reuse a connection with uncertain ACK state.
+	resetConnection := func() {
+		if u.conn != nil {
+			_ = u.conn.Close()
 		}
+		u.conn = nil
+		u.reader = nil
+	}
+
+	for i, entry := range logs {
+		if err := ctx.Err(); err != nil {
+			resetConnection()
+			return err
+		}
+
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf(
+				"marshal record %d: %w", i, err,
+			)
+		}
+
 		data = append(data, '\n')
 
-		u.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		// Apply a deadline to both writing and reading.
+		deadline := time.Now().Add(2 * time.Second)
 
-		n, err := u.conn.Write(data)
-		if err != nil {
-			log.Printf("[UDS] ❌ Write error: %v", err)
-			u.conn.Close()
-			u.conn = nil
-			return fmt.Errorf("socket write error: %w", err)
+		if ctxDeadline, ok := ctx.Deadline(); ok &&
+			ctxDeadline.Before(deadline) {
+			deadline = ctxDeadline
 		}
 
-		log.Printf("[UDS] 📤 Successfully wrote %d bytes to Rust Engine", n)
+		if err := u.conn.SetDeadline(deadline); err != nil {
+			resetConnection()
+			return fmt.Errorf(
+				"set deadline for record %d: %w", i, err,
+			)
+		}
+
+		// Write the entire record, handling short writes.
+		for written := 0; written < len(data); {
+			n, err := u.conn.Write(data[written:])
+			written += n
+
+			if err != nil {
+				resetConnection()
+				return fmt.Errorf(
+					"UDS write record %d: %w", i, err,
+				)
+			}
+
+			if n == 0 {
+				resetConnection()
+				return fmt.Errorf(
+					"UDS write record %d: %w",
+					i, io.ErrShortWrite,
+				)
+			}
+		}
+
+		// Rust sends one acknowledgement for each record.
+		response, err := u.reader.ReadString('\n')
+		if err != nil {
+			resetConnection()
+			return fmt.Errorf(
+				"UDS read ACK for record %d: %w", i, err,
+			)
+		}
+
+		response = strings.TrimSpace(response)
+
+		if response != "OK" {
+			resetConnection()
+			return fmt.Errorf(
+				"Rust rejected record %d: %s",
+				i, response,
+			)
+		}
 	}
+
+	// Clear deadlines before reusing the connection.
+	if err := u.conn.SetDeadline(time.Time{}); err != nil {
+		resetConnection()
+		return fmt.Errorf("clear UDS deadline: %w", err)
+	}
+
+	log.Printf(
+		"[UDS] Batch acknowledged: %d records",
+		len(logs),
+	)
 
 	return nil
 }
