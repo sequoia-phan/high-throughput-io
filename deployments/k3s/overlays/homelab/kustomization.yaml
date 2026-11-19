@@ -1,0 +1,16 @@
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ingestion
+
+resources:
+  - ../../base
+
+patches:
+  - path: service-nodeport.yaml
+
+images:
+  - name: ghcr.io/sequoia-phan/high-throughput-io
+    digest: sha256:813682a50d354da2970679808fb8dc420ec230ed2bd492dfb32fceac7d0672a9
+

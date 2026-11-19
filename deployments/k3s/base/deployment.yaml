@@ -1,0 +1,52 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: high-throughput-io
+  namespace: ingestion
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: high-throughput-io
+  template:
+    metadata:
+      labels:
+        app: high-throughput-io
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+
+      securityContext:
+        fsGroup: 100
+
+      containers:
+        - name: ingestion
+          image: ghcr.io/sequoia-phan/high-throughput-io:sha-bb38adfff965930625b7a90a51a23c9e7b9ae66e
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: grpc
+              containerPort: 50099
+            - name: metrics
+              containerPort: 9090
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+          volumeMounts:
+            - name: logs-storage
+              mountPath: /app/logs
+
+      volumes:
+        - name: logs-storage
+          persistentVolumeClaim:
+            claimName: ingestion-logs
+
