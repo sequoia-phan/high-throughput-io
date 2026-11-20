@@ -16,7 +16,7 @@ RUST_SRC := rust_engine
 RUST_TARGET := x86_64-unknown-linux-musl
 
 # Go binary path (adjust if necessary)
-GO_BIN := /usr/local/go/bin/go
+GO_BIN ?= go
 
 # Ensure bin/release directory exists
 $(BIN_DIR):
