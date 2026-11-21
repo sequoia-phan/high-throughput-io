@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io/internal/storage"
 	"log"
 	"net"
 	"os"
-	"flag"
 	"strconv"
 	"strings"
 	"time"
@@ -222,8 +222,24 @@ func (a *Agent) realGrpcInvoke(entry storage.LogEntry) error {
 }
 
 func main() {
-	clientID := "vm-pve-host"
-	serverAddr := "192.168.1.53:50099"
+	// clientID := "vm-pve-host"
+	// serverAddr := "192.168.1.53:50099"
+
+	// agent := NewAgent(clientID, serverAddr)
+	// agent.Run()
+
+	clientID := os.Getenv("AGENT_CLIENT_ID")
+	if clientID == "" {
+		clientID = "vm-pve-host"
+	}
+
+	serverAddr := os.Getenv("GRPC_SERVER_ADDR")
+	if serverAddr == "" {
+		serverAddr = "127.0.0.1:50099"
+	}
+
+	log.Printf("Agent ID: %s", clientID)
+	log.Printf("Connecting to gRPC server: %s", serverAddr)
 
 	agent := NewAgent(clientID, serverAddr)
 	agent.Run()
