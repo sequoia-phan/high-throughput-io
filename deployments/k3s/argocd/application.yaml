@@ -1,0 +1,23 @@
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: high-throughput-io
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/sequoia-phan/high-throughput-io.git
+    targetRevision: main
+    path: deployments/k3s/overlays/homelab
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ingestion
+
+  syncPolicy:
+    automated:
+      enabled: true
+      prune: false
+      selfHeal: true
