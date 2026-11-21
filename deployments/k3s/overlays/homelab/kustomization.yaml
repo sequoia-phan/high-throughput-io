@@ -12,5 +12,5 @@ patches:
 
 images:
   - name: ghcr.io/sequoia-phan/high-throughput-io
-    digest: sha256:813682a50d354da2970679808fb8dc420ec230ed2bd492dfb32fceac7d0672a9
+    digest: sha256:dd91d4073083f371829db7ce7986da3c9a17960026e502c7df39672906346c27
 
