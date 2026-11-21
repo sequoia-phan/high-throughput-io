@@ -1,27 +1,21 @@
 # High-Throughput I/O Logging System
 
-A hybrid Go/Rust system designed for extreme logging throughput.
+A Go/Rust experiment for studying burst ingestion, batching, Unix sockets, and buffered disk I/O.
 
 ## Overview
 
 This system provides a high-throughput logging pipeline where:
-- **Go** handles orchestration, API services (gRPC/HTTP), and worker management.
-- **Rust** provides a high-performance storage backend using Unix Domain Sockets (UDS) and buffered async I/O for minimal latency and maximum throughput.
+- **Go** runs an agent and a gRPC orchestrator with a batch processor.
+- **Rust** provides a high-performance storage backend using Unix Domain Sockets (UDS) and buffered async I/O.
 
 ## Architecture
 
-```
-+----------------+     gRPC/HTTP     +---------------------+     UDS     +-------------------+
-||   VM Agents    | ----------------> |   Orchestrator      | ---------> |  Rust Engine      ||
-|| (cpu/mem metrics) |   (port 50099)  | (batch processor,  |   socket    | (UDS listener +   |
-|+----------------+                   |  health tracker)    |            |  buffered writer)  |
-|                                     +---------------------+            +-------------------+
-|                                                                     |
-|                                                                     v
-|                                                       +-------------------+
-|                                                       |   Log Files       |
-|                                                       | (daily rotated)   |
-|                                                       +-------------------+
+```text
+VM agent --gRPC--> Go orchestrator --Unix socket--> Rust engine
+                         |                              |
+                   bounded queue                 buffered file writer
+                                                        |
+                                                   Linux filesystem
 ```
 
 ## Components
@@ -33,39 +27,38 @@ This system provides a high-throughput logging pipeline where:
 - Connects to the Rust engine via UDS at `/tmp/io_rust_engine.sock`.
 
 ### gRPC Server (`internal/api/grpc_server.go`)
-- Handles `UploadMetric` RPC (via generic handler for flexibility).
-- Captures unknown methods and logs them as generic metrics.
-- Logs real-time requests-per-second (RPS) for monitoring.
+- Implements unary `UploadMetric` and a client-streaming handler; the bundled agent uses unary calls.
+- Logs unary requests per second after submission, including records dropped by a full queue.
 
 ### HTTP Log Handler (`internal/api/log_handler.go`)
-- Accepts JSON log batches via POST.
+- Exists as an HTTP handler for JSON log batches via POST, but is not started by the current orchestrator.
 - Validates and forwards to the Rust engine.
 - Returns appropriate HTTP status codes.
 
-### Batch Processor (`internal/service/pipeline.go` - referenced)
-- Buffers logs and flushes based on batch size (20000) or timeout (500ms).
-- Implements the shock absorber pattern to protect the Rust engine from traffic spikes.
+### Batch Processor (`internal/service/pipeline.go`)
+- Buffers logs and flushes based on batch size (20,000) or ticker (50 ms). The 200,000-entry channel drops new entries when full.
+- The single worker cannot drain its queue while synchronously writing a batch.
 
 ### VM Agent (`cmd/agent/main.go`)
 - Collects system metrics (CPU, memory) from `/proc/stat` and `/proc/meminfo`.
-- Pushes metrics to the orchestrator via gRPC every 1ms (configurable in code).
-- Implements connection retry logic with exponential backoff.
+- Pushes one metric per synchronous gRPC call, then sleeps 200 µs. The declared sleep flag/environment variable is not used by the loop.
+- Retries connection probes and gRPC readiness; failed probes/readiness checks wait five seconds.
 
 ### Rust Storage Engine (`rust_engine/src/main.rs`)
 - **UDS Listener**: Binds to `/tmp/io_rust_engine.sock`, accepts connections, reads newline-delimited JSON.
-- **Buffered Disk Writer**: Async task that writes logs to daily files (`./logs/app_YYYY-MM-DD.log`) using a 64KB buffer.
+- **Buffered Disk Writer**: Async task that writes logs to date-named files (`./logs/app_YYYY-MM-DD.log`) using a 64 KiB buffer that is flushed per entry; no fsync is performed.
 - **Metrics Server**: Serves Prometheus metrics on `:9090` (configurable via `RUST_METRICS_ADDR`).
-- **Features**: Connection per client, JSON validation, backpressure via channel (50k capacity), detailed Prometheus metrics.
+- **Features**: Connection per client, JSON validation, backpressure via channel (50k capacity), Prometheus metrics for bytes, flushes, failures and invalid input. The file is named at startup, not rotated at midnight.
 
 ## Data Flow
 
 1. VM Agent collects CPU/memory metrics → packages as `LogEntry`.
-2. Agent connects via gRPC to orchestrator (`192.168.1.27:50099`).
+2. Agent connects to `GRPC_SERVER_ADDR` (default `127.0.0.1:50099`).
 3. Orchestrator's gRPC server receives entry → forwards to batch processor.
-4. Batch processor buffers; when batch size (20000) or timeout (500ms) reached → sends slice to Rust engine via UDS.
+4. Batch processor buffers; when batch size (20,000) or ticker (50 ms) reached → sends slice to Rust engine via UDS.
 5. Rust engine receives bytes, splits lines, validates JSON → forwards each line to disk writer channel.
 6. Disk writer appends line to buffered writer, flushes, updates metrics.
-7. Rust engine replies `OK\n` or `ERR\n` over the socket; Go side logs success/failure.
+7. Rust replies per entry, but Go does not read the replies. Go logs socket-write success, not Rust acknowledgement or durable persistence. The gRPC handler also returns success when the Go queue drops an entry.
 
 ## Build & Run
 
@@ -77,13 +70,10 @@ This system provides a high-throughput logging pipeline where:
 
 ### Build (Local)
 ```bash
-# Clean previous builds
-make clean
-
 # Build Go agent and server (static Linux binaries) -> bin/release/
 make build-agent build-server
 
-# Build Rust engine (statically linked via musl) -> rust_engine/target/x86_64-unknown-linux-musl/release/rust_engine
+# Build Rust engine (requires the musl target and toolchain) -> rust_engine/target/x86_64-unknown-linux-musl/release/rust_engine
 make build-rust
 
 # Or build all at once
@@ -99,9 +89,8 @@ The Go gRPC code depends on compiled `.proto` definitions. To (re)generate the G
 # go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
 # Generate from the proto file
-protoc --go_out=. --go-grpc_out=. grpc_impl/metrics.proto
-# Move generated files to the expected package location
-mv grpc_impl/*.pb.go internal/api/
+protoc --go_out=. --go_opt=module=io \
+  --go-grpc_out=. --go-grpc_opt=module=io grpc_impl/metrics.proto
 ```
 
 Regenerate whenever `grpc_impl/metrics.proto` changes.
@@ -138,17 +127,18 @@ The container starts both the Rust engine and the Go orchestrator automatically 
 Logs can be viewed with `docker logs -f htiol`.
 
 ### Configuration
-- **Go**: Set environment variables `APP_ENV`, `APP_PORT`, `LOG_LEVEL`.
-- **Rust**: Set `RUST_METRICS_ADDR` for Prometheus metrics endpoint (default `:9090`).
+- **Agent**: `GRPC_SERVER_ADDR` (default `127.0.0.1:50099`) and `AGENT_CLIENT_ID` (default `vm-pve-host`).
+- **Orchestrator**: the running pipeline uses hard-coded batch size 20,000, interval 50 ms, and socket path `/tmp/io_rust_engine.sock`; declared batch flags/environment variables are not applied.
+- **Rust**: `RUST_METRICS_ADDR` (default `0.0.0.0:9090`) and `RUST_SOCKET_PATH` (default `/tmp/io_rust_engine.sock`). Changing the latter alone does not change the Go or entrypoint path.
 
-## Key Features
-- **High Throughput**: Buffered async I/O in Rust, batch processing in Go.
-- **Resilience**: Connection retries, circuit breakers, backpressure handling.
-- **Observability**: Prometheus metrics from both Go (via orchestrator) and Rust components.
-- **Scalability**: Horizontal scaling of VM agents; orchestrator handles many connections.
-- **Daily Log Rotation**: Log files named by date (manual logrotate recommended).
-- **Minimal Dependencies**: Clean, focused dependency lists.
-- **Containerization**: Multi-stage Docker build for reproducible deployment.
+## Current limitations
+
+- Go's bounded queue drops records when full, but unary gRPC still reports success.
+- Go writes UDS records without reading Rust's replies; socket backpressure can stall writes. Failed batches are logged and not retried.
+- Rust flushes every entry to the file interface without `fsync`; this is not a durability guarantee.
+- The active orchestrator does not expose Go Prometheus metrics. Rust exposes metrics on port 9090.
+- The Rust filename uses the date at startup; automatic daily rotation is not implemented.
+- See [ingestion review](INGESTION_PIPELINE_REVIEW.md) for source references and hypotheses.
 
 ## Extensibility
 - Add new log fields by extending `LogEntry` struct in both Go and Rust.
@@ -159,9 +149,9 @@ Logs can be viewed with `docker logs -f htiol`.
 ---
 *See [DOCUMENTATION.md](DOCUMENTATION.md) for in-depth details.*
 
-## QEMU Guest Agent Snippet
+## QEMU Guest Agent Snippet (historical plan)
 
-The `deploy-vm.sh` script uses a cloud-init snippet to install the QEMU Guest Agent inside the provisioned VM. The snippet is located at:
+The following was documented for a `deploy-vm.sh` provisioning script. That script is not present in this checkout; retain this snippet as a deployment reference. The intended snippet location is:
 
 ```
 /var/lib/vz/snippets/qemu-guest-agent.yaml

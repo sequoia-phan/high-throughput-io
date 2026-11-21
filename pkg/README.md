@@ -1,8 +1,6 @@
 # Public Packages
 
-Contains reusable libraries that could theoretically be imported by other Go projects.
+- `telemetry/`: Prometheus HTTP and UDS metric definitions and HTTP middleware. The active gRPC orchestrator does not currently wire these metrics into its pipeline.
+- `metrics/`: a standalone example HTTP metrics server with placeholder handlers, not the active orchestrator.
 
-- `client/`: Client libraries for interacting with the orchestrator.
-- `logger/`: Standardized logging wrappers.
-- `metrics/`: Prometheus metric definitions and registry.
-- `telemetry/`: Distributed tracing and observability utilities.
+Client libraries, logging wrappers and distributed tracing were described previously as possible future packages; they are not present here.

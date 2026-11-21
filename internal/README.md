@@ -1,11 +1,8 @@
 # Internal Logic
 
-Contains private application code that is not intended for use by other projects.
+- `api/`: gRPC service, HTTP handlers, routing and middleware. The current orchestrator starts the gRPC service only.
+- `config/`: configuration loader, not used by the current gRPC orchestrator.
+- `service/`: batch processor and health tracker.
+- `storage/`: log model, storage interface, mock and Unix socket bridge.
 
-- `api/`: HTTP handlers, routing, and middleware.
-- `config/`: Configuration loading and environment variable management.
-- `domain/`: Core business entities and domain models.
-- `provider/`: External service providers and adapters.
-- `service/`: Business logic implementation (Use Cases).
-- `storage/`: Storage abstractions and the bridge to the Rust Engine.
-- `store/`: Concrete data store implementations.
+The previously listed `domain/`, `provider/` and `store/` directories are not present; they remain possible future organization plans.

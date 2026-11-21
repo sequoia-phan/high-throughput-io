@@ -1,5 +1,7 @@
 # High-Throughput I/O Logging System - Production Plan (Push Model)
 
+> **Historical plan:** The checklist below is preserved as originally written, not a statement of current implementation. A Go unary agent and UDS bridge now exist; streaming-client, zero-copy and hardening work remain plans. Rust currently uses buffered file I/O, not direct I/O. See [current documentation](../DOCUMENTATION.md) for actual behavior.
+
 ## 🎯 Objective
 A professional, push-based metrics collection system where VM/CTX agents stream binary data to a centralized Go Orchestrator, which pipes it into a high-performance Rust storage engine.
 

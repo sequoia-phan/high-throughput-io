@@ -1,7 +1,3 @@
 # Deployments
 
-Infrastructure and configuration files for deploying the system across different environments.
-
-- `docker/`: Dockerfiles and Compose configurations for containerization.
-- `k8s/`: Kubernetes manifests and Helm charts for cluster orchestration.
-- `local-dev/`: Scripts and configs for rapid local development.
+The container build and entrypoint are at the repository root (`Dockerfile` and `entrypoint.sh`). Kubernetes manifests are in the root `k3s/` directory. The previously described `docker/`, `k8s/` and `local-dev/` directories are not present in this checkout; they may be considered future organization plans.

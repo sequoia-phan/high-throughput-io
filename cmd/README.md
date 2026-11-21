@@ -1,47 +1,12 @@
 # Command Entry Points
 
-This directory contains the main entry points for the different binaries of the system.
+- `agent/`: collects Linux CPU/memory information and sends unary gRPC requests. Set `GRPC_SERVER_ADDR` and optionally `AGENT_CLIENT_ID`. The loop currently sleeps 200 µs after each successful request; the declared sleep flag/environment variable is not used.
+- `orchestrator/`: starts the batch processor, health tracker and gRPC server. Its active settings are hard-coded to a 20,000-entry batch and 50 ms ticker; declared batch flags/environment variables are not applied.
+- `benchmark/`: HTTP load generator, targeting an HTTP ingestion endpoint rather than the active gRPC server. Run load tests only after establishing suitable limits.
+- `worker/`: placeholder, not an implemented worker.
 
-- `benchmark/`: Tools to measure the throughput and latency of the logging pipeline.
-- `orchestrator/`: The main control plane that manages log flow and coordinates workers.
-- `worker/`: Processing units that handle log ingestion and forward them to the storage engine.
-- `ioctl/`: System-level control tools for managing the engine state.
+See the root [README](../README.md) for build and run instructions. A full Go queue drops incoming records; increasing batch size or changing the ticker alone does not establish or fix the cause of a bottleneck.
 
+## Planned configuration wiring
 
-## Verify the wiring works
-
-After you’ve edited the two files, run:
-
-```bash
-# rebuilds agent & server binaries
-make clean && make build    
-
-# Then start a quick test:
-# start rust engine (already built)
-./rust_engine/target/x86_64-unknown-linux-musl/release/rust_engine &
-
-# start server with custom values
-./bin/release/grpc-server -batch-size=40000 -flush-interval=100ms &
-
-# start a couple of agents with different sleeps
-./bin/release/grpc-agent -sleep=500us &
-./bin/release/grpc-agent -sleep=200us &
-```
-
-Watch the orchestrator’s stdout – you’ll see lines like:
-
-
-📈 Requests/sec: 3421.12 (total in last second: 3421)
-
-
-If you ever see ❌ CRITICAL: Pipeline buffer full, dropping metric! you know the offered load exceeds the current batchSize / flushInterval capacity; simply increase -batch-size or decrease -flush-interval (or run more server instances) and rebuild/restart.
-
-
-
-TL;DR – What you get
-
-| Component    | Configurable knob                                  | Default | How to set                                                 |
-|--------------|----------------------------------------------------|---------|------------------------------------------------------------|
-| Agent        | push interval (-sleep or AGENT_SLEEP)              | 1ms     | -sleep=200us or AGENT_SLEEP=50ms ./grpc-agent              |
-| Orchestrator | batch size (-batch-size or BATCH_SIZE)             | 20 000  | -batch-size=40000 or BATCH_SIZE=80000 ./grpc-server        |
-|              | flush interval (-flush-interval or FLUSH_INTERVAL) | 500ms   | -flush-interval=100ms or FLUSH_INTERVAL=20ms ./grpc-server |
+The earlier plan described `-sleep`/`AGENT_SLEEP` for the agent and `-batch-size`/`BATCH_SIZE` and `-flush-interval`/`FLUSH_INTERVAL` for the orchestrator. These remain intended configuration knobs, but are not currently wired into the running loops. Once implemented, their behavior and defaults should be verified before using them in load tests.

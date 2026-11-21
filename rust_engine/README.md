@@ -1,25 +1,10 @@
 # Rust Storage Engine
 
-The high-performance backend responsible for persisting logs to disk with minimal overhead.
+The Rust engine accepts newline-delimited JSON over a Unix domain socket and appends valid records to a file.
 
-## Key Features
-- **UDS Communication**: Uses Unix Domain Sockets for ultra-low latency IPC with the Go orchestrator.
-- **Buffered Disk I/O**: Uses `tokio` and `BufWriter`; each accepted entry is flushed before acknowledgment.
-- **Write Acknowledgments**: The UDS protocol replies `OK` after the entry is written and the userspace buffer is flushed. Go reports success only after receiving this reply.
-- **Internal Metrics**: Exposes its own Prometheus endpoint to monitor disk flush durations and write failures.
+- The listener starts a task per connection. Each task sends a record to a shared bounded 50,000-entry writer channel, waits for the writer and sends `OK` or `ERR` before reading the next record.
+- A single task writes through a 64 KiB Tokio `BufWriter` and flushes each record. The filename `./logs/app_YYYY-MM-DD.log` uses the date when the writer starts; automatic midnight rotation is not implemented.
+- The reply confirms the file write and userspace buffer flush, not `fsync` or durable storage. The current Go client does not read replies or retry failed batches. Unread replies can eventually block the connection.
+- Prometheus metrics are served on `RUST_METRICS_ADDR` (default `0.0.0.0:9090`). `RUST_SOCKET_PATH` defaults to `/tmp/io_rust_engine.sock`; the Go orchestrator currently uses that fixed path.
 
-## Development
-- Build: `cargo build --release`
-- Test: `cargo test`
-- Run: `cargo run`
-
-The acknowledgment confirms a successful write and userspace buffer flush. It does
-not call `fsync`/`sync_data`, so it does not guarantee survival of an OS or power
-failure. Flushes happen per entry to keep the acknowledgment tied to that entry,
-which trades some throughput for clearer delivery semantics.
-
-If a connection fails after Rust writes an entry but before Go receives its
-acknowledgment, Go retries the entry. This preserves delivery across uncertain
-failures but can produce duplicate log lines; the protocol does not provide
-exactly-once delivery. Logs waiting in the Go queue are also held only in memory
-and can be lost if the Go process exits unexpectedly.
+From this directory: `cargo build --release`, `cargo test`, or `cargo run`. Log paths are relative to the process working directory. See the root [documentation](../DOCUMENTATION.md) for the complete flow and limitations.
